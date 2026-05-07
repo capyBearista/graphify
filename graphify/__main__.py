@@ -677,43 +677,35 @@ def _cursor_uninstall(project_dir: Path) -> None:
     print(f"graphify Cursor rule removed from {rule_path.resolve()}")
 
 
-# OpenCode tool.execute.before plugin — fires before every tool call.
-# Injects a graph reminder into bash command output when graph.json exists.
+# OpenCode plugin — annotates grep/glob results with a graph marker,
+# flags file edits, and reminds the agent to update the graph on next bash call.
 _OPENCODE_PLUGIN_JS = """\
 // graphify OpenCode plugin
-// Prevents blind file exploration by directing the agent to the knowledge graph first.
-// Tracks read/grep/glob operations and throws a reminder after 3+ without graph consultation.
-// Also flags file edits to remind the agent to run `graphify update .` on next bash call.
+// Annotates grep/glob results with a graph reminder and flags file edits
+// to remind the agent to update the graph.
 import { existsSync, writeFileSync } from "fs";
 import { join } from "path";
 
 export const GraphifyPlugin = async ({ directory }) => {
   const graphDir = join(directory, "graphify-out");
   const graphJson = join(graphDir, "graph.json");
-  const navDone = join(graphDir, ".graphify_nav_read");
+  const graphReport = join(graphDir, "GRAPH_REPORT.md");
   const dirtyFlag = join(graphDir, ".graphify_dirty");
 
   if (!existsSync(graphJson)) return {};
 
-  const SEARCH = ["read", "grep", "glob"];
-  let ops = 0;
-
   return {
-    "tool.execute.before": (input, output) => {
-      // Blocker: enforce graph consultation before blind file reads
-      if (SEARCH.includes(input.tool)) {
-        if (existsSync(navDone)) return;
-        ops++;
-        if (ops >= 3) {
-          throw new Error(
-            "This project has a knowledge graph at graphify-out/ — your map of the codebase. " +
-            "Read graphify-out/GRAPH_REPORT.md first (maps god nodes + communities in ~2K tokens, faster than scanning files).\n" +
-            "After reading, run: touch graphify-out/.graphify_nav_read"
-          );
-        }
+    "tool.execute.after": (input, output) => {
+      if (["grep", "glob"].includes(input.tool)) {
+        output.output =
+          `[graphify] A knowledge graph for this project exists:\\n` +
+          `\\u2192 run \\`graphify query "<question>"\\` to traverse relationships\\n` +
+          `\\u2192 read ${graphReport} for god nodes and community structure\\n` +
+          `---\\n${output.output}`;
       }
+    },
 
-      // Reminder: graph update needed after file edits
+    "tool.execute.before": (input, output) => {
       if (input.tool === "bash" && existsSync(dirtyFlag)) {
         output.args.command =
           'echo "[graphify] Source files changed — run `graphify update .` to keep the graph current (AST-only, free)." && ' +
@@ -723,7 +715,6 @@ export const GraphifyPlugin = async ({ directory }) => {
     },
 
     "file.edited": () => {
-      // Flag that source files changed so the agent receives an update reminder
       try { writeFileSync(dirtyFlag, Date.now().toString()); } catch {}
     },
   };
@@ -739,7 +730,7 @@ def _install_opencode_plugin(project_dir: Path) -> None:
     plugin_file = project_dir / _OPENCODE_PLUGIN_PATH
     plugin_file.parent.mkdir(parents=True, exist_ok=True)
     plugin_file.write_text(_OPENCODE_PLUGIN_JS, encoding="utf-8")
-    print(f"  {_OPENCODE_PLUGIN_PATH}  ->  tool.execute.before hook written")
+    print(f"  {_OPENCODE_PLUGIN_PATH}  ->  hooks written (tool.execute.after, tool.execute.before, file.edited)")
 
     config_file = project_dir / _OPENCODE_CONFIG_PATH
     if config_file.exists():
