@@ -681,24 +681,50 @@ def _cursor_uninstall(project_dir: Path) -> None:
 # Injects a graph reminder into bash command output when graph.json exists.
 _OPENCODE_PLUGIN_JS = """\
 // graphify OpenCode plugin
-// Injects a knowledge graph reminder before bash tool calls when the graph exists.
-import { existsSync } from "fs";
+// Prevents blind file exploration by directing the agent to the knowledge graph first.
+// Tracks read/grep/glob operations and throws a reminder after 3+ without graph consultation.
+// Also flags file edits to remind the agent to run `graphify update .` on next bash call.
+import { existsSync, writeFileSync } from "fs";
 import { join } from "path";
 
 export const GraphifyPlugin = async ({ directory }) => {
-  let reminded = false;
+  const graphDir = join(directory, "graphify-out");
+  const graphJson = join(graphDir, "graph.json");
+  const navDone = join(graphDir, ".graphify_nav_read");
+  const dirtyFlag = join(graphDir, ".graphify_dirty");
+
+  if (!existsSync(graphJson)) return {};
+
+  const SEARCH = ["read", "grep", "glob"];
+  let ops = 0;
 
   return {
-    "tool.execute.before": async (input, output) => {
-      if (reminded) return;
-      if (!existsSync(join(directory, "graphify-out", "graph.json"))) return;
-
-      if (input.tool === "bash") {
-        output.args.command =
-          'echo "[graphify] Knowledge graph available. Read graphify-out/GRAPH_REPORT.md for god nodes and architecture context before searching files." && ' +
-          output.args.command;
-        reminded = true;
+    "tool.execute.before": (input, output) => {
+      // Blocker: enforce graph consultation before blind file reads
+      if (SEARCH.includes(input.tool)) {
+        if (existsSync(navDone)) return;
+        ops++;
+        if (ops >= 3) {
+          throw new Error(
+            "This project has a knowledge graph at graphify-out/ — your map of the codebase. " +
+            "Read graphify-out/GRAPH_REPORT.md first (maps god nodes + communities in ~2K tokens, faster than scanning files).\n" +
+            "After reading, run: touch graphify-out/.graphify_nav_read"
+          );
+        }
       }
+
+      // Reminder: graph update needed after file edits
+      if (input.tool === "bash" && existsSync(dirtyFlag)) {
+        output.args.command =
+          'echo "[graphify] Source files changed — run `graphify update .` to keep the graph current (AST-only, free)." && ' +
+          output.args.command;
+        try { writeFileSync(dirtyFlag, ""); } catch {}
+      }
+    },
+
+    "file.edited": () => {
+      // Flag that source files changed so the agent receives an update reminder
+      try { writeFileSync(dirtyFlag, Date.now().toString()); } catch {}
     },
   };
 };
